@@ -1,0 +1,108 @@
+---
+name: Git Branch Management
+description: Systematically review local Git branches against origin/main, allowing for merging, deleting, or skipping, with state persistence.
+author: Your Name/Team (or leave blank)
+tags: [git, branch, management, workflow, maintenance]
+requires_confirmation: true # Indicates user interaction is needed during the process
+---
+
+# Rule: Git Branch Management
+
+## Description
+
+This rule outlines a systematic process for reviewing local Git branches, comparing them against the remote main branch (`origin/main`), and deciding on an action (merge, delete, or skip) for each branch. It uses a state file (`git-branch-state.json`) to track progress and allow the process to be paused and resumed.
+
+## State File
+
+- **Path:** `./git-branch-state.json` (relative to the workspace root)
+- **Purpose:** To persist the state of the branch management task across multiple runs, enabling resumption.
+- **Structure:**
+  ```json
+  {
+    "all_local_branches": [], // List of all non-main/master branches found initially
+    "processed_branches": [], // List of branches already processed
+    "branches_to_process": [], // List of branches remaining to be processed
+    "last_action_result": null // Result of the last action (e.g., "merged_successfully", "deleted", "skipped", "checkout_failed", "merge_conflict")
+  }
+  ```
+
+## Process Steps
+
+1.  **Initialization & State Check:**
+    a.  Check if the state file (`./git-branch-state.json`) exists.
+    b.  **If exists:**
+        i.  Read the state from the file.
+        ii. Proceed directly to Step 4 (Process Branches), using the `branches_to_process` list from the loaded state.
+    c.  **If not exists:**
+        i.  Initialize an empty state object in memory: `{"all_local_branches": [], "processed_branches": [], "branches_to_process": [], "last_action_result": null}`.
+        ii. Proceed to Step 2.
+
+2.  **Verify Clean Working Directory:**
+    a.  Run the terminal command: `git status --porcelain`.
+    b.  **If the command outputs *any* text:** Abort the process. Inform the user that a clean working directory (no uncommitted changes or untracked files) is required. Do *not* create the state file.
+    c.  **If the command outputs *nothing*:** Proceed to Step 3.
+
+3.  **Fetch & Identify Branches:**
+    a.  Run the terminal command: `git fetch origin`.
+    b.  Run the terminal command: `git branch --format='%(refname:short)' | grep -v -E '^(main|master)$' > .git_branches_temp`. (*This lists local branches, filters out 'main' and 'master', and saves to a temporary file.*)
+    c.  Read the contents of the temporary file `.git_branches_temp`. Parse each line as a branch name.
+    d.  Populate the `all_local_branches` and `branches_to_process` lists in the state object with the parsed branch names.
+    e.  Run the terminal command: `rm .git_branches_temp` to delete the temporary file.
+    f.  Save the current state object to `./git-branch-state.json`.
+
+4.  **Process Branches (Loop):**
+    a.  Check if the `branches_to_process` list in the current state is empty. If yes, proceed to Step 5 (Cleanup).
+    b.  Get the first branch name from the `branches_to_process` list. Assign it to a variable, e.g., `current_branch`.
+    c.  **Checkout Branch:**
+        i.  Run the terminal command: `git checkout <current_branch>`.
+        ii. **If checkout fails:**
+            - Report the error to the user.
+            - Add `current_branch` to the `processed_branches` list.
+            - Remove `current_branch` from the `branches_to_process` list.
+            - Set `last_action_result` in the state to `"checkout_failed"`.
+            - Save the updated state to `./git-branch-state.json`.
+            - Go back to Step 4a.
+    d.  **Diff against Remote Main:**
+        i.  Run the terminal command: `git --no-pager diff origin/main...HEAD`.
+        ii. Present the full diff output to the user.
+    e.  **Query User Action:** Present the following options to the user:
+        ```
+        **Branch:** <current_branch>
+        **Diff against origin/main shown above.**
+
+        What action should be taken?
+        1. **Merge `origin/main`**: Attempt to merge the latest `origin/main` into <current_branch>.
+        2. **Delete Branch**: Force delete the local branch <current_branch>.
+        3. **Skip Branch**: Do nothing with this branch and move to the next one.
+        ```
+    f.  **Execute Action (Based on User Input):**
+        i.  **Action 1 (Merge):**
+            *   Run the terminal command: `git merge origin/main`.
+            *   **If successful:** Set `last_action_result` to `"merged_successfully"`. Proceed to Step 4g.
+            *   **If conflicts:**
+                - Report the merge conflict details to the user.
+                - Set `last_action_result` to `"merge_conflict"`.
+                - **Crucially:** Do *not* modify `processed_branches` or `branches_to_process`. The branch remains at the front of the queue.
+                - Save the updated state to `./git-branch-state.json`.
+                - Inform the user they must resolve the conflicts manually and re-run the process. Terminate the current run.
+        ii. **Action 2 (Delete):**
+            *   Run the terminal command: `git checkout main` (or `master`, whichever is the primary branch). Handle potential checkout errors. If checkout fails, report the error and stop.
+            *   Run the terminal command: `git branch -D <current_branch>`.
+            *   Set `last_action_result` to `"deleted"`. Proceed to Step 4g.
+        iii. **Action 3 (Skip):**
+            *   Set `last_action_result` to `"skipped"`. Proceed to Step 4g.
+    g.  **Update State (Post-Action, excluding Merge Conflict):**
+        i.  Add `current_branch` to the `processed_branches` list.
+        ii. Remove `current_branch` from the `branches_to_process` list.
+        iii. Save the updated state to `./git-branch-state.json`.
+    h.  Go back to Step 4a to process the next branch.
+
+5.  **Cleanup:**
+    a.  Run the terminal command: `git checkout main` (or `master`). Handle potential errors.
+    b.  Run the terminal command: `rm git-branch-state.json`.
+    c.  Inform the user that the branch management process is complete.
+
+6.  **Self-Correction / Improvement (Optional but Recommended):**
+    a.  After completion or interruption, review the process execution.
+    b.  Note any difficulties, ambiguities, or inefficiencies encountered.
+    c.  Suggest specific improvements to this rule description for future use (e.g., clearer wording, better error handling, more robust state management).
