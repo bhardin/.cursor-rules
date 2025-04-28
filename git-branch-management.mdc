@@ -14,7 +14,7 @@ This rule outlines a systematic process for reviewing local Git branches, compar
 
 ## State File
 
-- **Path:** `./git-branch-state.json` (relative to the workspace root)
+- **Path:** `./tmp/git-branch-state.json` (relative to the workspace root)
 - **Purpose:** To persist the state of the branch management task across multiple runs, enabling resumption.
 - **Structure:**
   ```json
