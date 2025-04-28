@@ -1,16 +1,16 @@
 ---
-name: Git Branch Management (version 0.2.3) [follows semver]
-description: Systematically review local Git branches against origin/main using commit history, allowing for merging, deleting, or skipping, with state persistence, automatic deletion of empty branches, and optional detailed change summaries.
+name: Git Branch Management (version 0.2.4) [follows semver]
+description: Systematically review local Git branches against origin/main using commit history, allowing for merging, deleting, or skipping, with state persistence, automatic deletion of empty branches, robust handling of checkout issues and merge conflicts, and optional detailed change summaries.
 author: Your Name/Team (or leave blank)
-tags: [git, branch, management, workflow, maintenance, automation, summary]
+tags: [git, branch, management, workflow, maintenance, automation, summary, conflict handling]
 requires_confirmation: true # Indicates user interaction is generally needed during the process
 ---
 
-# Rule: Git Branch Management (Revised v2.3)
+# Rule: Git Branch Management (Revised v2.4)
 
 ## Description
 
-This rule outlines a systematic process for reviewing local Git branches, comparing their commit history against the remote main branch (`origin/main`), and deciding on an action (merge, delete, or skip) for each branch. It uses a state file (`./tmp/git-branch-state.json`) to track progress and allow the process to be paused and resumed. This version uses commit logs for review, automatically deletes branches with no unique commits, and allows requesting a high-level behavioral summary of changes.
+This rule outlines a systematic process for reviewing local Git branches, comparing their commit history against the remote primary branch (`origin/main`), and deciding on an action (merge, delete, or skip) for each branch. It uses a state file (`./tmp/git-branch-state.json`) to track progress and allow the process to be paused and resumed. This version uses commit logs for review, automatically deletes branches with no unique commits, handles checkout failures and merge conflicts more robustly, and allows requesting a high-level behavioral summary of changes.
 
 ## State File
 
@@ -19,10 +19,11 @@ This rule outlines a systematic process for reviewing local Git branches, compar
 - **Structure:**
   ```json
   {
-    "all_local_branches": [], // List of all non-main/master branches found initially
+    "all_local_branches": [], // List of all non-primary branches found initially
     "processed_branches": [], // List of branches already processed
     "branches_to_process": [], // List of branches remaining to be processed
-    "last_action_result": null // Result of the last action (e.g., "merged_successfully", "deleted", "deleted_auto_empty", "skipped", "skipped_needs_review", "checkout_failed", "merge_conflict")
+    "last_action_result": null // Result of the last action (e.g., "merged_successfully", "deleted", "deleted_auto_empty", "skipped", "skipped_needs_review", "checkout_failed_uncommitted", "checkout_failed_other", "merge_conflict_aborted", "merge_failed_other")
+    "primary_branch_name": "main" // Determined or assumed primary branch name
   }
   ```
 
@@ -31,93 +32,102 @@ This rule outlines a systematic process for reviewing local Git branches, compar
 1.  **Initialization & State Check:**
     a.  Check if the state file (`./tmp/git-branch-state.json`) exists.
     b.  **If exists:**
-        i.  Read the state from the file.
+        i.  Read the state from the file. Assume `primary_branch_name` from state if present, otherwise default to 'main'.
         ii. Proceed directly to Step 4 (Process Branches), using the `branches_to_process` list from the loaded state.
     c.  **If not exists:**
-        i.  Initialize an empty state object in memory: `{"all_local_branches": [], "processed_branches": [], "branches_to_process": [], "last_action_result": null}`.
-        ii. Ensure the `./tmp/` directory exists (e.g., `mkdir -p tmp`).
-        iii. Proceed to Step 2.
+        i.  Determine the primary branch name (e.g., check for 'main', then 'master', or ask user if ambiguous). Store in `primary_branch_name`.
+        ii. Initialize an empty state object in memory, including the determined `primary_branch_name`.
+        iii. Ensure the `./tmp/` directory exists (e.g., `mkdir -p tmp`).
+        iv. Proceed to Step 2.
 
 2.  **Verify Clean Working Directory:**
-    a.  Run the terminal command: `git status --porcelain`.
-    b.  **If the command outputs *any* text:** Abort the process. Inform the user that a clean working directory (no uncommitted changes or untracked files) is required. Do *not* create the state file.
-    c.  **If the command outputs *nothing*:** Proceed to Step 3.
+    a.  Run `git status --porcelain`.
+    b.  **If output exists:** Abort. Inform user a clean working directory is required *before starting*. Do *not* create the state file.
+    c.  **If output is empty:** Proceed to Step 3.
 
 3.  **Fetch & Identify Branches:**
-    a.  Run the terminal command: `git fetch origin`.
-    b.  Run the terminal command: `git branch --format='%(refname:short)' | grep -v -E '^(main|master)$' > .git_branches_temp`. (*This lists local branches, filters out 'main' and 'master', and saves to a temporary file.*)
-    c.  Read the contents of the temporary file `.git_branches_temp`. Parse each line as a branch name.
-    d.  Populate the `all_local_branches` and `branches_to_process` lists in the state object with the parsed branch names.
-    e.  Run the terminal command: `rm .git_branches_temp` to delete the temporary file.
+    a.  Run `git fetch origin`.
+    b.  Run `git branch --format='%(refname:short)' | grep -v -E "^($(state.primary_branch_name))$" > .git_branches_temp`. (*List local branches, filter out the primary branch, save to temp file.*)
+    c.  Read `.git_branches_temp`. Parse each line as a branch name.
+    d.  Populate `all_local_branches` and `branches_to_process` in the state object.
+    e.  Run `rm .git_branches_temp`.
     f.  Save the current state object to `./tmp/git-branch-state.json`.
 
 4.  **Process Branches (Loop):**
-    a.  Check if the `branches_to_process` list in the current state is empty. If yes, proceed to Step 5 (Cleanup).
-    b.  Get the first branch name from the `branches_to_process` list. Assign it to a variable, e.g., `current_branch`.
+    a.  If `branches_to_process` is empty, proceed to Step 5 (Cleanup).
+    b.  Get the first branch name from `branches_to_process`. Assign to `current_branch`.
     c.  **Checkout Branch:**
-        i.  Run the terminal command: `git checkout <current_branch>`.
+        i.  Run `git checkout <current_branch>`.
         ii. **If checkout fails:**
-            - Report the error to the user.
-            - Update state: Add `current_branch` to `processed_branches`, remove from `branches_to_process`, set `last_action_result` to `"checkout_failed"`.
-            - Save state to `./tmp/git-branch-state.json`.
-            - Go back to Step 4a.
+            - Capture the error message from Git.
+            - **If error indicates uncommitted changes:**
+                - Report the error: "Checkout failed for `<current_branch>` due to uncommitted changes. Please stash or commit changes manually."
+                - Update state: Add `current_branch` to `processed_branches`, remove from `branches_to_process`, set `last_action_result` to `"checkout_failed_uncommitted"`.
+                - Save state. Go back to Step 4a. (User must resolve manually and restart/resume).
+            - **If other error:**
+                - Report the specific error.
+                - Update state: Add `current_branch` to `processed_branches`, remove from `branches_to_process`, set `last_action_result` to `"checkout_failed_other"`.
+                - Save state. Go back to Step 4a.
     d.  **Show Branch-Specific Commits & Check for Emptiness:**
-        i.  **Find Merge Base:** Run `git merge-base origin/main HEAD` and store the output hash (e.g., `<merge-base-hash>`).
-        ii. **Check Unique Commits:** Run `git --no-pager log <merge-base-hash>..HEAD --oneline` and capture the output.
+        i.  Run `git merge-base origin/<state.primary_branch_name> HEAD` and store the output hash (`<merge-base-hash>`). Handle errors if merge-base cannot be found.
+        ii. Run `git --no-pager log <merge-base-hash>..HEAD --oneline` and capture the output.
         iii. **If output is empty (no unique commits):**
-            - Inform the user: "Branch `<current_branch>` has no unique commits compared to `origin/main`. Deleting automatically."
+            - Inform user: "Branch `<current_branch>` has no unique commits compared to `origin/<state.primary_branch_name>`. Deleting automatically."
             - Proceed to Step 4f.ii (Automated Delete Action).
         iv. **If output is *not* empty:**
-            - Present the commit log output to the user.
-            - Ask the user: **"What next for `<current_branch>`? View 'details' (diff summary), 'update' (merge main), 'delete', or 'skip'?"**
-            - **If user response is "details":**
-                - Run `git diff <merge-base-hash>..HEAD | cat`.
-                - Analyze the diff output.
-                - Provide a high-level summary of the *behavioral* changes introduced by the commits (e.g., "Added tests for X feature", "Refactored Y service", "Fixed bug related to Z"). **Do not include filenames in the summary.**
-                - After providing the summary, proceed to Step 4e (Query User Action - present numbered options again).
-            - **If user response is "update", "delete", or "skip":**
-                - Proceed directly to Step 4f, using the user's response to determine the action (mapping "update" to Action 1, "delete" to Action 2, "skip" to Action 3). **Do not show the numbered list in Step 4e.**
-    e.  **Query User Action (Only if user requested "details" previously):** Present the following options to the user:
+            - Present the commit log output.
+            - Ask: **"What next for `<current_branch>`? View 'details' (diff summary), 'merge' (merge main), 'delete', or 'skip'?"**
+            - **If "details":**
+                - Run `git diff <merge-base-hash>..HEAD | cat`. Warn user the output might be large.
+                - Analyze diff, provide high-level *behavioral* summary (no filenames).
+                - Proceed to Step 4e (Query User Action - present numbered options again).
+            - **If "merge", "delete", or "skip":**
+                - Proceed directly to Step 4f, using the user's response.
+    e.  **Query User Action (Only after "details"):** Present options:
         ```
         **Branch:** <current_branch>
         **Details provided above.**
 
         What action should be taken?
-        1. **Merge origin/main**: Attempt to merge the latest `origin/main` into <current_branch>.
+        1. **Merge origin/<state.primary_branch_name>**: Attempt to merge the latest primary branch into <current_branch>.
         2. **Delete Branch**: Force delete the local branch <current_branch>.
-        3. **Skip**: Do nothing with this branch and move to the next one, marking it as processed.
+        3. **Skip**: Do nothing with this branch and move to the next one.
         ```
-        *(Note: This step is now only reached after 'details' has been shown. The user's choice here maps directly to Step 4f actions)*
-    f.  **Execute Action:** (Determine action based on user response in 4d.iv or 4e)
-        i.  **Action 1 (Merge origin/main):**
-            *   Run the terminal command: `git merge origin/main`.
+    f.  **Execute Action:**
+        i.  **Action 1 (Merge origin/<state.primary_branch_name>):**
+            *   Run `git merge origin/<state.primary_branch_name>`.
             *   **If successful:** Set `last_action_result` to `"merged_successfully"`. Proceed to Step 4h.
             *   **If conflicts:**
-                - Report the merge conflict details to the user.
-                - Set `last_action_result` to `"merge_conflict"`.
-                - **Crucially:** Do *not* modify `processed_branches` or `branches_to_process`. The branch remains at the front of the queue.
-                - Save the updated state to `./tmp/git-branch-state.json`.
-                - Inform the user they must resolve the conflicts manually and re-run the process. Terminate the current run.
-        ii. **Action 2 (Delete Branch) OR Automated Delete (Empty Branch):**
-            *   Run the terminal command: `git checkout main` (or `master`, whichever is the primary branch). Handle potential checkout errors. If checkout fails, report the error and stop.
-            *   Run the terminal command: `git branch -D <current_branch>`.
-            *   Set `last_action_result` based on how this step was reached: `"deleted"` for user choice, `"deleted_auto_empty"` for automated deletion.
+                - Report merge conflict details.
+                - Run `git merge --abort`.
+                - Report that the merge was aborted due to conflicts.
+                - Set `last_action_result` to `"merge_conflict_aborted"`.
+                - Add `current_branch` to `processed_branches`, remove from `branches_to_process`. (We skip it after aborting the merge).
+                - Save state. Go back to Step 4a. (Branch is now skipped, requires manual attention later).
+            *   **If merge fails for other reasons:**
+                - Report the specific error.
+                - Set `last_action_result` to `"merge_failed_other"`.
+                - Add `current_branch` to `processed_branches`, remove from `branches_to_process`.
+                - Save state. Go back to Step 4a.
+        ii. **Action 2 (Delete Branch) OR Automated Delete:**
+            *   Run `git checkout <state.primary_branch_name>`. Handle potential checkout errors (report and stop if primary cannot be checked out).
+            *   Run `git branch -D <current_branch>`. Handle potential errors.
+            *   Set `last_action_result` based on cause: `"deleted"` or `"deleted_auto_empty"`.
             *   Proceed to Step 4h.
         iii. **Action 3 (Skip):**
             *   Set `last_action_result` to `"skipped"`. Proceed to Step 4h.
-    g.  **(Removed as automated delete logic is now directly in 4f.ii)**
-    h.  **Update State (Post-Action, excluding Merge Conflict):**
-        i.  Add `current_branch` to the `processed_branches` list.
-        ii. Remove `current_branch` from the `branches_to_process` list.
-        iii. Save the updated state to `./tmp/git-branch-state.json`.
-    i.  Go back to Step 4a to process the next branch.
+    g.  **(Removed)**
+    h.  **Update State (Post-Action, excluding checkout failures handled in 4c.ii):**
+        i.  Add `current_branch` to `processed_branches`.
+        ii. Remove `current_branch` from `branches_to_process`.
+        iii. Save updated state to `./tmp/git-branch-state.json`.
+    i.  Go back to Step 4a.
 
 5.  **Cleanup (Only if loop completes naturally):**
-    a.  Run the terminal command: `git checkout main` (or `master`). Handle potential errors.
-    b.  Run the terminal command: `rm ./tmp/git-branch-state.json`.
-    c.  Inform the user that the branch management process is complete.
+    a.  Run `git checkout <state.primary_branch_name>`. Handle potential errors.
+    b.  Run `rm ./tmp/git-branch-state.json`.
+    c.  Inform user the process is complete.
 
-6.  **Self-Correction / Improvement (Optional but Recommended):**
-    a.  After completion or interruption, review the process execution.
-    b.  Note any difficulties, ambiguities, or inefficiencies encountered.
-    c.  Suggest specific improvements to this rule description for future use (e.g., clearer wording, better error handling, more robust state management).
+6.  **Self-Correction / Improvement (Optional):**
+    a.  After completion/interruption, review execution.
+    b.  Note difficulties, suggest improvements to this rule.
