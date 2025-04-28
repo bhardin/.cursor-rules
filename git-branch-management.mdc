@@ -1,16 +1,16 @@
 ---
-name: Git Branch Management (version 0.2.4) [follows semver]
+name: Git Branch Management (version 0.2.5) [follows semver]
 description: Systematically review local Git branches against origin/main using commit history, allowing for merging, deleting, or skipping, with state persistence, automatic deletion of empty branches, robust handling of checkout issues and merge conflicts, and optional detailed change summaries.
 author: Your Name/Team (or leave blank)
 tags: [git, branch, management, workflow, maintenance, automation, summary, conflict handling]
 requires_confirmation: true # Indicates user interaction is generally needed during the process
 ---
 
-# Rule: Git Branch Management (Revised v2.4)
+# Rule: Git Branch Management (Revised v0.2.5)
 
 ## Description
 
-This rule outlines a systematic process for reviewing local Git branches, comparing their commit history against the remote primary branch (`origin/main`), and deciding on an action (merge, delete, or skip) for each branch. It uses a state file (`./tmp/git-branch-state.json`) to track progress and allow the process to be paused and resumed. This version uses commit logs for review, automatically deletes branches with no unique commits, handles checkout failures and merge conflicts more robustly, and allows requesting a high-level behavioral summary of changes.
+This rule outlines a systematic process for reviewing local Git branches, comparing their commit history against the remote primary branch (`origin/main`), and deciding on an action (merge, delete, or skip) for each branch. It uses a state file (`./tmp/git-branch-state.json`) to track progress and allow the process to be paused and resumed. This version uses commit logs for review, automatically deletes branches with no unique commits, handles checkout failures and merge conflicts more robustly, allows requesting a summary of changes, and uses `--no-edit` for merges.
 
 ## State File
 
@@ -22,7 +22,7 @@ This rule outlines a systematic process for reviewing local Git branches, compar
     "all_local_branches": [], // List of all non-primary branches found initially
     "processed_branches": [], // List of branches already processed
     "branches_to_process": [], // List of branches remaining to be processed
-    "last_action_result": null // Result of the last action (e.g., "merged_successfully", "deleted", "deleted_auto_empty", "skipped", "skipped_needs_review", "checkout_failed_uncommitted", "checkout_failed_other", "merge_conflict_aborted", "merge_failed_other")
+    "last_action_result": null, // Result of the last action (e.g., "merged_successfully", "deleted", "deleted_auto_empty", "skipped", "skipped_needs_review", "checkout_failed_uncommitted", "checkout_failed_other", "merge_conflict_aborted", "merge_failed_other")
     "primary_branch_name": "main" // Determined or assumed primary branch name
   }
   ```
@@ -33,7 +33,7 @@ This rule outlines a systematic process for reviewing local Git branches, compar
     a.  Check if the state file (`./tmp/git-branch-state.json`) exists.
     b.  **If exists:**
         i.  Read the state from the file. Assume `primary_branch_name` from state if present, otherwise default to 'main'.
-        ii. Proceed directly to Step 4 (Process Branches), using the `branches_to_process` list from the loaded state.
+        ii. Proceed directly to Step 4 (Process Branches), using the `branches_to_process` list from the loaded state. **Note:** Branches previously skipped due to errors (checkout failed, merge conflict) will remain skipped on resumption and require manual resolution.
     c.  **If not exists:**
         i.  Determine the primary branch name (e.g., check for 'main', then 'master', or ask user if ambiguous). Store in `primary_branch_name`.
         ii. Initialize an empty state object in memory, including the determined `primary_branch_name`.
@@ -42,7 +42,7 @@ This rule outlines a systematic process for reviewing local Git branches, compar
 
 2.  **Verify Clean Working Directory:**
     a.  Run `git status --porcelain`.
-    b.  **If output exists:** Abort. Inform user a clean working directory is required *before starting*. Do *not* create the state file.
+    b.  **If output exists:** Abort. Inform user a clean working directory is required *before starting* and *must be maintained* throughout the process. Do *not* create the state file.
     c.  **If output is empty:** Proceed to Step 3.
 
 3.  **Fetch & Identify Branches:**
@@ -63,11 +63,11 @@ This rule outlines a systematic process for reviewing local Git branches, compar
             - **If error indicates uncommitted changes:**
                 - Report the error: "Checkout failed for `<current_branch>` due to uncommitted changes. Please stash or commit changes manually."
                 - Update state: Add `current_branch` to `processed_branches`, remove from `branches_to_process`, set `last_action_result` to `"checkout_failed_uncommitted"`.
-                - Save state. Go back to Step 4a. (User must resolve manually and restart/resume).
+                - Save state. Go back to Step 4a. (**Manual user intervention required before this branch can be re-evaluated.**).
             - **If other error:**
                 - Report the specific error.
                 - Update state: Add `current_branch` to `processed_branches`, remove from `branches_to_process`, set `last_action_result` to `"checkout_failed_other"`.
-                - Save state. Go back to Step 4a.
+                - Save state. Go back to Step 4a. (**Manual user intervention likely required.**).
     d.  **Show Branch-Specific Commits & Check for Emptiness:**
         i.  Run `git merge-base origin/<state.primary_branch_name> HEAD` and store the output hash (`<merge-base-hash>`). Handle errors if merge-base cannot be found.
         ii. Run `git --no-pager log <merge-base-hash>..HEAD --oneline` and capture the output.
@@ -76,17 +76,17 @@ This rule outlines a systematic process for reviewing local Git branches, compar
             - Proceed to Step 4f.ii (Automated Delete Action).
         iv. **If output is *not* empty:**
             - Present the commit log output.
-            - Ask: **"What next for `<current_branch>`? View 'details' (diff summary), 'merge' (merge main), 'delete', or 'skip'?"**
-            - **If "details":**
-                - Run `git diff <merge-base-hash>..HEAD | cat`. Warn user the output might be large.
-                - Analyze diff, provide high-level *behavioral* summary (no filenames).
+            - Ask: **"What next for `<current_branch>`? View 'summary' (summary of changes), 'merge' (merge main), 'delete', or 'skip'?"**
+            - **If "summary":**
+                - Run `git --no-pager diff <merge-base-hash>..HEAD`.
+                - Analyze the full diff output, provide a high-level *textual summary* of the core changes (not just file names).
                 - Proceed to Step 4e (Query User Action - present numbered options again).
             - **If "merge", "delete", or "skip":**
                 - Proceed directly to Step 4f, using the user's response.
-    e.  **Query User Action (Only after "details"):** Present options:
+    e.  **Query User Action (Only after "summary"):** Present options:
         ```
         **Branch:** <current_branch>
-        **Details provided above.**
+        **Summary provided above.**
 
         What action should be taken?
         1. **Merge origin/<state.primary_branch_name>**: Attempt to merge the latest primary branch into <current_branch>.
@@ -95,7 +95,7 @@ This rule outlines a systematic process for reviewing local Git branches, compar
         ```
     f.  **Execute Action:**
         i.  **Action 1 (Merge origin/<state.primary_branch_name>):**
-            *   Run `git merge origin/<state.primary_branch_name>`.
+            *   Run `git merge origin/<state.primary_branch_name> --no-edit`. (**Uses --no-edit to avoid prompt**)
             *   **If successful:** Set `last_action_result` to `"merged_successfully"`. Proceed to Step 4h.
             *   **If conflicts:**
                 - Report merge conflict details.
@@ -130,4 +130,4 @@ This rule outlines a systematic process for reviewing local Git branches, compar
 
 6.  **Self-Correction / Improvement (Optional):**
     a.  After completion/interruption, review execution.
-    b.  Note difficulties, suggest improvements to this rule.
+    b.  Note difficulties, suggest improvements to this rule.%  
